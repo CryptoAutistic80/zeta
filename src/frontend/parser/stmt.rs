@@ -9,12 +9,73 @@ use nom::multi::many0;
 use nom::sequence::{delimited, preceded};
 
 use super::expr::parse_full_expr;
-use super::parser::ws;
+use super::parser::{parse_ident, ws};
 
 pub fn parse_assign(input: &str) -> IResult<&str, AstNode> {
+    // let/mut bindings (types are accepted but ignored by the parser)
+    if let Ok((input, (_let_kw, _mut_kw, name, _ty_opt))) = (
+        opt(ws(tag("let"))),
+        opt(ws(tag("mut"))),
+        ws(parse_ident),
+        opt(preceded(ws(tag(":")), ws(parse_ident))),
+    )
+        .parse(input)
+    {
+        let (input, op) = ws(alt((tag("+="), tag("-="), tag("*="), tag("/="), tag("=")))).parse(input)?;
+        let (input, rhs) = ws(parse_full_expr).parse(input)?;
+        let lhs = AstNode::Var(name);
+        let rhs = match op {
+            "+=" => AstNode::BinaryOp {
+                op: "+".to_string(),
+                left: Box::new(lhs.clone()),
+                right: Box::new(rhs),
+            },
+            "-=" => AstNode::BinaryOp {
+                op: "-".to_string(),
+                left: Box::new(lhs.clone()),
+                right: Box::new(rhs),
+            },
+            "*=" => AstNode::BinaryOp {
+                op: "*".to_string(),
+                left: Box::new(lhs.clone()),
+                right: Box::new(rhs),
+            },
+            "/=" => AstNode::BinaryOp {
+                op: "/".to_string(),
+                left: Box::new(lhs.clone()),
+                right: Box::new(rhs),
+            },
+            _ => rhs,
+        };
+        return Ok((input, AstNode::Assign(Box::new(lhs), Box::new(rhs))));
+    }
+
     let (input, lhs) = ws(parse_full_expr).parse(input)?;
-    let (input, _) = ws(tag("=")).parse(input)?;
+    let (input, op) = ws(alt((tag("+="), tag("-="), tag("*="), tag("/="), tag("=")))).parse(input)?;
     let (input, rhs) = ws(parse_full_expr).parse(input)?;
+    let rhs = match op {
+        "+=" => AstNode::BinaryOp {
+            op: "+".to_string(),
+            left: Box::new(lhs.clone()),
+            right: Box::new(rhs),
+        },
+        "-=" => AstNode::BinaryOp {
+            op: "-".to_string(),
+            left: Box::new(lhs.clone()),
+            right: Box::new(rhs),
+        },
+        "*=" => AstNode::BinaryOp {
+            op: "*".to_string(),
+            left: Box::new(lhs.clone()),
+            right: Box::new(rhs),
+        },
+        "/=" => AstNode::BinaryOp {
+            op: "/".to_string(),
+            left: Box::new(lhs.clone()),
+            right: Box::new(rhs),
+        },
+        _ => rhs,
+    };
     Ok((input, AstNode::Assign(Box::new(lhs), Box::new(rhs))))
 }
 
@@ -46,7 +107,7 @@ pub fn parse_if(input: &str) -> IResult<&str, AstNode> {
 }
 
 pub fn parse_stmt(input: &str) -> IResult<&str, AstNode> {
-    alt((
+    let (input, stmt) = alt((
         parse_assign,
         parse_return,
         parse_if,
@@ -55,5 +116,7 @@ pub fn parse_stmt(input: &str) -> IResult<&str, AstNode> {
             expr: Box::new(expr),
         }),
     ))
-    .parse(input)
+    .parse(input)?;
+    let (input, _) = opt(ws(tag(";"))).parse(input)?;
+    Ok((input, stmt))
 }

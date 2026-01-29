@@ -107,6 +107,22 @@ impl<'ctx> LLVMCodegen<'ctx> {
             Some(Linkage::External),
         );
 
+        // Basic printing (println)
+        let println_type = i64_type.fn_type(&[i64_type.into()], false);
+        module.add_function("println", println_type, Some(Linkage::External));
+
+        // Basic input (read_line)
+        let read_line_type = i64_type.fn_type(&[], false);
+        module.add_function("read_line", read_line_type, Some(Linkage::External));
+        module.add_function("read_int", read_line_type, Some(Linkage::External));
+
+        // Blackjack helpers
+        let bj_type = i64_type.fn_type(&[], false);
+        module.add_function("bj_init", bj_type, Some(Linkage::External));
+        module.add_function("bj_draw", bj_type, Some(Linkage::External));
+        module.add_function("bj_last_name", bj_type, Some(Linkage::External));
+        module.add_function("bj_last_is_ace", bj_type, Some(Linkage::External));
+
         Self {
             context,
             module,

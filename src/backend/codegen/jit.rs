@@ -7,7 +7,8 @@ use crate::runtime::actor::scheduler::host_spawn;
 use crate::runtime::host::{
     host_datetime_now, host_free, host_http_get, host_str_concat, host_str_contains,
     host_str_ends_with, host_str_len, host_str_replace, host_str_starts_with,
-    host_str_to_lowercase, host_str_to_uppercase, host_str_trim, host_tls_handshake,
+    host_str_to_lowercase, host_str_to_uppercase, host_str_trim, host_tls_handshake, host_println,
+    host_read_line, host_read_int, host_bj_init, host_bj_draw, host_bj_last_name, host_bj_last_is_ace,
 };
 use crate::runtime::xai::XAIClient;
 use inkwell::OptimizationLevel;
@@ -118,6 +119,27 @@ impl<'ctx> LLVMCodegen<'ctx> {
         if let Some(f) = self.module.get_function("host_str_replace") {
             ee.add_global_mapping(&f, host_str_replace as *const () as usize);
         }
+        if let Some(f) = self.module.get_function("println") {
+            ee.add_global_mapping(&f, host_println as *const () as usize);
+        }
+        if let Some(f) = self.module.get_function("read_line") {
+            ee.add_global_mapping(&f, host_read_line as *const () as usize);
+        }
+        if let Some(f) = self.module.get_function("read_int") {
+            ee.add_global_mapping(&f, host_read_int as *const () as usize);
+        }
+        if let Some(f) = self.module.get_function("bj_init") {
+            ee.add_global_mapping(&f, host_bj_init as *const () as usize);
+        }
+        if let Some(f) = self.module.get_function("bj_draw") {
+            ee.add_global_mapping(&f, host_bj_draw as *const () as usize);
+        }
+        if let Some(f) = self.module.get_function("bj_last_name") {
+            ee.add_global_mapping(&f, host_bj_last_name as *const () as usize);
+        }
+        if let Some(f) = self.module.get_function("bj_last_is_ace") {
+            ee.add_global_mapping(&f, host_bj_last_is_ace as *const () as usize);
+        }
         if let Some(f) = self.module.get_function("channel_send") {
             ee.add_global_mapping(&f, host_channel_send as *const () as usize);
         }
@@ -227,6 +249,27 @@ pub fn host_llvm_jit_from_ir(ir: String) -> Result<ExecutionEngine<'static>, Box
     }
     if let Some(f) = module.get_function("host_str_replace") {
         ee.add_global_mapping(&f, host_str_replace as *const () as usize);
+    }
+    if let Some(f) = module.get_function("println") {
+        ee.add_global_mapping(&f, host_println as *const () as usize);
+    }
+    if let Some(f) = module.get_function("read_line") {
+        ee.add_global_mapping(&f, host_read_line as *const () as usize);
+    }
+    if let Some(f) = module.get_function("read_int") {
+        ee.add_global_mapping(&f, host_read_int as *const () as usize);
+    }
+    if let Some(f) = module.get_function("bj_init") {
+        ee.add_global_mapping(&f, host_bj_init as *const () as usize);
+    }
+    if let Some(f) = module.get_function("bj_draw") {
+        ee.add_global_mapping(&f, host_bj_draw as *const () as usize);
+    }
+    if let Some(f) = module.get_function("bj_last_name") {
+        ee.add_global_mapping(&f, host_bj_last_name as *const () as usize);
+    }
+    if let Some(f) = module.get_function("bj_last_is_ace") {
+        ee.add_global_mapping(&f, host_bj_last_is_ace as *const () as usize);
     }
     if let Some(f) = module.get_function("host_channel_send") {
         ee.add_global_mapping(&f, host_channel_send as *const () as usize);

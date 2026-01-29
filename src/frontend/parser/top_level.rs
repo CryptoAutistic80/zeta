@@ -6,7 +6,7 @@ use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::multispace0;
 use nom::combinator::{map, opt};
-use nom::multi::{many0, separated_list1};
+use nom::multi::{many0, separated_list0, separated_list1};
 use nom::sequence::{delimited, preceded};
 
 use super::parser::{parse_generics, parse_ident, parse_keyword, ws};
@@ -25,7 +25,7 @@ fn parse_func(input: &str) -> IResult<&str, AstNode> {
     let (input, generics_opt) = opt(ws(parse_generics)).parse(input)?;
     let (input, params) = delimited(
         ws(tag("(")),
-        separated_list1(ws(tag(",")), ws(parse_param)),
+        separated_list0(ws(tag(",")), ws(parse_param)),
         ws(tag(")")),
     )
     .parse(input)?;
@@ -80,7 +80,7 @@ fn parse_method_sig(input: &str) -> IResult<&str, AstNode> {
     let (input, generics_opt) = opt(ws(parse_generics)).parse(input)?;
     let (input, params) = delimited(
         ws(tag("(")),
-        separated_list1(ws(tag(",")), ws(parse_param)),
+        separated_list0(ws(tag(",")), ws(parse_param)),
         ws(tag(")")),
     )
     .parse(input)?;

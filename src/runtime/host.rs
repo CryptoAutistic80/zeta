@@ -3,9 +3,12 @@ use crate::runtime::std::{std_free, std_malloc};
 use libc::strlen;
 use reqwest::blocking::Client;
 use std::ffi::{CStr, CString, c_char};
+use std::io;
 use std::os::raw::c_void;
 use std::ptr;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use lazy_static::lazy_static;
 
 /// Returns the current datetime as milliseconds since UNIX epoch.
 ///
@@ -190,6 +193,206 @@ pub unsafe extern "C" fn host_str_replace(s: i64, old: i64, new: i64) -> i64 {
         ptr::copy_nonoverlapping(cstring.as_ptr(), ptr as *mut c_char, len);
     }
     ptr as i64
+}
+
+/// Prints a null-terminated string with newline.
+///
+/// # Safety
+/// Input must be a valid null-terminated string pointer (i64 cast).
+#[allow(unsafe_op_in_unsafe_fn)]
+pub unsafe extern "C" fn host_println(s: i64) -> i64 {
+    if s == 0 {
+        println!();
+        return 0;
+    }
+    let st = unsafe { CStr::from_ptr(s as *const c_char) }
+        .to_str()
+        .unwrap_or("");
+    println!("{}", st);
+    0
+}
+
+/// Reads a line from stdin and returns a null-terminated string pointer.
+///
+/// # Safety
+/// Caller must free returned pointer. Returns 0 on EOF or error.
+#[allow(unsafe_op_in_unsafe_fn)]
+pub unsafe extern "C" fn host_read_line() -> i64 {
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return 0;
+    }
+    if input.is_empty() {
+        return 0;
+    }
+    // Normalize line endings and avoid interior nulls.
+    let input = input.trim_end_matches(&['\n', '\r'][..]).replace('\0', "");
+    let cstring = CString::new(input).unwrap();
+    let len = cstring.as_bytes_with_nul().len();
+    let ptr = std_malloc(len);
+    unsafe {
+        ptr::copy_nonoverlapping(cstring.as_ptr(), ptr as *mut c_char, len);
+    }
+    ptr as i64
+}
+
+/// Reads a line from stdin and parses it as i64.
+///
+/// # Safety
+/// Returns 0 on EOF or parse error.
+#[allow(unsafe_op_in_unsafe_fn)]
+pub unsafe extern "C" fn host_read_int() -> i64 {
+    let mut input = String::new();
+    if io::stdin().read_line(&mut input).is_err() {
+        return 0;
+    }
+    input.trim().parse::<i64>().unwrap_or(0)
+}
+
+#[derive(Clone)]
+struct BjCard {
+    name: String,
+    value: i64,
+    is_ace: bool,
+}
+
+struct BlackjackState {
+    deck: Vec<BjCard>,
+    idx: usize,
+    last: Option<BjCard>,
+    rng: u64,
+}
+
+impl BlackjackState {
+    fn new() -> Self {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+        Self {
+            deck: Vec::new(),
+            idx: 0,
+            last: None,
+            rng: seed ^ 0x9E3779B97F4A7C15,
+        }
+    }
+
+    fn next_rand(&mut self) -> u64 {
+        // simple LCG
+        self.rng = self.rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+        self.rng
+    }
+
+    fn reset(&mut self) {
+        self.deck = build_bj_deck();
+        // Fisher-Yates shuffle
+        let len = self.deck.len();
+        let mut i = len;
+        while i > 1 {
+            i -= 1;
+            let j = (self.next_rand() % (i as u64 + 1)) as usize;
+            self.deck.swap(i, j);
+        }
+        self.idx = 0;
+        self.last = None;
+    }
+
+    fn draw(&mut self) -> Option<BjCard> {
+        if self.idx >= self.deck.len() {
+            return None;
+        }
+        let card = self.deck[self.idx].clone();
+        self.idx += 1;
+        self.last = Some(card.clone());
+        Some(card)
+    }
+}
+
+fn build_bj_deck() -> Vec<BjCard> {
+    let ranks: [(&str, i64, bool); 13] = [
+        ("A", 11, true),
+        ("2", 2, false),
+        ("3", 3, false),
+        ("4", 4, false),
+        ("5", 5, false),
+        ("6", 6, false),
+        ("7", 7, false),
+        ("8", 8, false),
+        ("9", 9, false),
+        ("10", 10, false),
+        ("J", 10, false),
+        ("Q", 10, false),
+        ("K", 10, false),
+    ];
+    let suits = ["S", "H", "D", "C"];
+    let mut deck = Vec::with_capacity(52);
+    for suit in suits {
+        for (rank, value, is_ace) in ranks {
+            deck.push(BjCard {
+                name: format!("{}{}", rank, suit),
+                value,
+                is_ace,
+            });
+        }
+    }
+    deck
+}
+
+lazy_static! {
+    static ref BJ_STATE: Mutex<BlackjackState> = Mutex::new(BlackjackState::new());
+}
+
+fn alloc_cstring(s: &str) -> i64 {
+    let cstring = CString::new(s).unwrap();
+    let len = cstring.as_bytes_with_nul().len();
+    let ptr = unsafe { std_malloc(len) };
+    unsafe {
+        ptr::copy_nonoverlapping(cstring.as_ptr(), ptr as *mut c_char, len);
+    }
+    ptr as i64
+}
+
+/// Initializes and shuffles a 52-card deck for blackjack.
+#[allow(unsafe_op_in_unsafe_fn)]
+pub unsafe extern "C" fn host_bj_init() -> i64 {
+    if let Ok(mut state) = BJ_STATE.lock() {
+        state.reset();
+        return 1;
+    }
+    0
+}
+
+/// Draws the next card. Returns its value (Ace=11).
+#[allow(unsafe_op_in_unsafe_fn)]
+pub unsafe extern "C" fn host_bj_draw() -> i64 {
+    if let Ok(mut state) = BJ_STATE.lock() {
+        if let Some(card) = state.draw() {
+            return card.value;
+        }
+    }
+    0
+}
+
+/// Returns the name of the last drawn card (e.g., "AS").
+#[allow(unsafe_op_in_unsafe_fn)]
+pub unsafe extern "C" fn host_bj_last_name() -> i64 {
+    if let Ok(state) = BJ_STATE.lock() {
+        if let Some(card) = &state.last {
+            return alloc_cstring(&card.name);
+        }
+    }
+    0
+}
+
+/// Returns 1 if the last drawn card was an Ace, else 0.
+#[allow(unsafe_op_in_unsafe_fn)]
+pub unsafe extern "C" fn host_bj_last_is_ace() -> i64 {
+    if let Ok(state) = BJ_STATE.lock() {
+        if let Some(card) = &state.last {
+            return if card.is_ace { 1 } else { 0 };
+        }
+    }
+    0
 }
 
 #[allow(unsafe_op_in_unsafe_fn)]

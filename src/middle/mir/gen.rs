@@ -12,6 +12,7 @@ pub struct MirGen {
     defers: Vec<u32>,
     defer_stmts: Vec<MirStmt>,
     type_map: HashMap<u32, String>,
+    var_ids: HashMap<String, u32>,
 }
 
 impl MirGen {
@@ -24,10 +25,22 @@ impl MirGen {
             defers: vec![],
             defer_stmts: vec![],
             type_map: HashMap::new(),
+            var_ids: HashMap::new(),
         }
     }
 
     pub fn lower_to_mir(&mut self, ast: &AstNode) -> Mir {
+        if let AstNode::FuncDef { params, .. } = ast {
+            // Reserve ids for parameters so var lookups resolve to arg slots.
+            self.var_ids.clear();
+            for (i, (name, _)) in params.iter().enumerate() {
+                self.var_ids.insert(name.clone(), i as u32);
+                self.type_map
+                    .insert(i as u32, params[i].1.clone());
+            }
+            self.next_id = params.len() as u32;
+        }
+
         self.lower_ast(ast);
 
         Mir {
@@ -67,11 +80,32 @@ impl MirGen {
         match ast {
             AstNode::Assign(lhs, rhs) => {
                 let rhs_id = self.lower_expr(rhs);
-                let lhs_id = self.lower_expr(lhs);
-                self.stmts.push(MirStmt::Assign {
-                    lhs: lhs_id,
-                    rhs: rhs_id,
-                });
+                match &**lhs {
+                    AstNode::Var(name) => {
+                        let lhs_id = if let Some(id) = self.var_ids.get(name) {
+                            *id
+                        } else {
+                            let id = self.next_id();
+                            self.var_ids.insert(name.clone(), id);
+                            id
+                        };
+                        self.stmts.push(MirStmt::Assign {
+                            lhs: lhs_id,
+                            rhs: rhs_id,
+                        });
+                        if let Some(ty) = self.type_map.get(&rhs_id).cloned() {
+                            self.type_map.insert(lhs_id, ty);
+                        }
+                        self.exprs.insert(lhs_id, MirExpr::Var(lhs_id));
+                    }
+                    _ => {
+                        let lhs_id = self.lower_expr(lhs);
+                        self.stmts.push(MirStmt::Assign {
+                            lhs: lhs_id,
+                            rhs: rhs_id,
+                        });
+                    }
+                }
             }
             AstNode::Return(inner) => {
                 let val = self.lower_expr(inner);
@@ -186,18 +220,17 @@ impl MirGen {
             }
             AstNode::If { cond, then, else_ } => {
                 let cond_id = self.lower_expr(cond);
-                let mut then_stmts = vec![];
+                let then_start = self.stmts.len();
                 for s in then {
-                    let mut r#gen = MirGen::new();
-                    r#gen.lower_ast(s);
-                    then_stmts.extend(r#gen.stmts);
+                    self.lower_ast(s);
                 }
-                let mut else_stmts = vec![];
+                let then_stmts: Vec<MirStmt> = self.stmts.drain(then_start..).collect();
+
+                let else_start = self.stmts.len();
                 for s in else_ {
-                    let mut r#gen = MirGen::new();
-                    r#gen.lower_ast(s);
-                    else_stmts.extend(r#gen.stmts);
+                    self.lower_ast(s);
                 }
+                let else_stmts: Vec<MirStmt> = self.stmts.drain(else_start..).collect();
                 self.stmts.push(MirStmt::If {
                     cond: cond_id,
                     then: then_stmts,
@@ -216,9 +249,19 @@ impl MirGen {
         let id = self.next_id();
 
         match expr {
-            AstNode::Var(_name) => {
-                self.exprs.insert(id, MirExpr::Var(id));
-                self.type_map.insert(id, "i64".to_string()); // Conservative default
+            AstNode::Var(name) => {
+                let vid = if let Some(id) = self.var_ids.get(name) {
+                    *id
+                } else {
+                    let id = self.next_id();
+                    self.var_ids.insert(name.clone(), id);
+                    id
+                };
+                self.exprs.insert(vid, MirExpr::Var(vid));
+                self.type_map
+                    .entry(vid)
+                    .or_insert_with(|| "i64".to_string());
+                return vid;
             }
             AstNode::Lit(n) => {
                 self.exprs.insert(id, MirExpr::Lit(*n));
@@ -237,6 +280,100 @@ impl MirGen {
                 let inner_id = self.lower_expr(inner);
                 self.exprs.insert(id, MirExpr::TimingOwned(inner_id));
                 self.type_map.insert(id, "i64".to_string());
+            }
+            AstNode::BinaryOp { op, left, right } => {
+                let left_id = self.lower_expr(left);
+                let right_id = self.lower_expr(right);
+                let lty = self.type_map[&left_id].clone();
+                let rty = self.type_map[&right_id].clone();
+
+                if op == "+" && lty == "str" && rty == "str" {
+                    self.stmts.push(MirStmt::Call {
+                        func: "host_str_concat".to_string(),
+                        args: vec![left_id, right_id],
+                        dest: id,
+                        type_args: vec![],
+                    });
+                    self.type_map.insert(id, "str".to_string());
+                } else if lty == "i64" && rty == "i64" {
+                    match op.as_str() {
+                        "+" => self.stmts.push(MirStmt::SemiringFold {
+                            op: SemiringOp::Add,
+                            values: vec![left_id, right_id],
+                            result: id,
+                        }),
+                        "*" => self.stmts.push(MirStmt::SemiringFold {
+                            op: SemiringOp::Mul,
+                            values: vec![left_id, right_id],
+                            result: id,
+                        }),
+                        "-" => self.stmts.push(MirStmt::Call {
+                            func: "__sub".to_string(),
+                            args: vec![left_id, right_id],
+                            dest: id,
+                            type_args: vec![],
+                        }),
+                        "/" => self.stmts.push(MirStmt::Call {
+                            func: "__div".to_string(),
+                            args: vec![left_id, right_id],
+                            dest: id,
+                            type_args: vec![],
+                        }),
+                        "==" => self.stmts.push(MirStmt::Call {
+                            func: "__cmp_eq".to_string(),
+                            args: vec![left_id, right_id],
+                            dest: id,
+                            type_args: vec![],
+                        }),
+                        "!=" => self.stmts.push(MirStmt::Call {
+                            func: "__cmp_neq".to_string(),
+                            args: vec![left_id, right_id],
+                            dest: id,
+                            type_args: vec![],
+                        }),
+                        ">" => self.stmts.push(MirStmt::Call {
+                            func: "__cmp_gt".to_string(),
+                            args: vec![left_id, right_id],
+                            dest: id,
+                            type_args: vec![],
+                        }),
+                        "<" => self.stmts.push(MirStmt::Call {
+                            func: "__cmp_lt".to_string(),
+                            args: vec![left_id, right_id],
+                            dest: id,
+                            type_args: vec![],
+                        }),
+                        ">=" => self.stmts.push(MirStmt::Call {
+                            func: "__cmp_gte".to_string(),
+                            args: vec![left_id, right_id],
+                            dest: id,
+                            type_args: vec![],
+                        }),
+                        "<=" => self.stmts.push(MirStmt::Call {
+                            func: "__cmp_lte".to_string(),
+                            args: vec![left_id, right_id],
+                            dest: id,
+                            type_args: vec![],
+                        }),
+                        _ => self.stmts.push(MirStmt::Call {
+                            func: op.clone(),
+                            args: vec![left_id, right_id],
+                            dest: id,
+                            type_args: vec![],
+                        }),
+                    }
+                    self.type_map.insert(id, "i64".to_string());
+                } else {
+                    self.stmts.push(MirStmt::Call {
+                        func: op.clone(),
+                        args: vec![left_id, right_id],
+                        dest: id,
+                        type_args: vec![],
+                    });
+                    self.type_map.insert(id, "unknown".to_string());
+                }
+
+                self.exprs.insert(id, MirExpr::Var(id));
             }
             AstNode::DictLit { .. } => {
                 self.exprs.insert(id, MirExpr::Var(id));
@@ -294,12 +431,16 @@ impl MirGen {
                     type_args: type_args.clone(),
                 });
 
-                let ret_ty = if receiver_ty.is_some_and(|rty| rty == "str") {
+                let ret_ty = if receiver_ty.as_deref() == Some("str") {
                     match method.as_str() {
                         "starts_with" | "ends_with" | "contains" => "i64".to_string(),
                         "len" => "i64".to_string(),
                         _ => "str".to_string(),
                     }
+                } else if receiver_ty.is_none()
+                    && (method == "read_line" || method == "bj_last_name")
+                {
+                    "str".to_string()
                 } else {
                     "i64".to_string()
                 };

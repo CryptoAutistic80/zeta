@@ -2,6 +2,7 @@
 use super::codegen::LLVMCodegen;
 use crate::middle::mir::mir::{Mir, MirExpr, MirStmt, SemiringOp};
 use inkwell::values::{BasicMetadataValueEnum, BasicValueEnum, CallSiteValue, FunctionValue};
+use inkwell::IntPredicate;
 use std::collections::HashMap;
 
 impl<'ctx> LLVMCodegen<'ctx> {
@@ -17,7 +18,10 @@ impl<'ctx> LLVMCodegen<'ctx> {
             .map(|_| self.i64_type.into())
             .collect();
         let fn_type = self.i64_type.fn_type(&param_types, false);
-        let fn_val = self.module.add_function(&fn_name, fn_type, None);
+        let fn_val = self
+            .module
+            .get_function(&fn_name)
+            .unwrap_or_else(|| self.module.add_function(&fn_name, fn_type, None));
         let entry = self.context.append_basic_block(fn_val, "entry");
         self.builder.position_at_end(entry);
         self.locals.clear();
@@ -68,7 +72,49 @@ impl<'ctx> LLVMCodegen<'ctx> {
                 dest,
                 type_args: _,
             } => {
-                let callee = self.get_callee(func);
+                // Built-in arithmetic/comparison helpers
+                if func == "__sub" || func == "__div" || func.starts_with("__cmp_") {
+                    let lhs = self.gen_expr(&exprs[&args[0]], exprs).into_int_value();
+                    let rhs = self.gen_expr(&exprs[&args[1]], exprs).into_int_value();
+                    let val: BasicValueEnum<'ctx> = if func == "__sub" {
+                        self.builder
+                            .build_int_sub(lhs, rhs, "sub")
+                            .unwrap()
+                            .into()
+                    } else if func == "__div" {
+                        self.builder
+                            .build_int_signed_div(lhs, rhs, "div")
+                            .unwrap()
+                            .into()
+                    } else {
+                        let pred = match func.as_str() {
+                            "__cmp_eq" => IntPredicate::EQ,
+                            "__cmp_neq" => IntPredicate::NE,
+                            "__cmp_gt" => IntPredicate::SGT,
+                            "__cmp_gte" => IntPredicate::SGE,
+                            "__cmp_lt" => IntPredicate::SLT,
+                            "__cmp_lte" => IntPredicate::SLE,
+                            _ => IntPredicate::NE,
+                        };
+                        let cmp = self
+                            .builder
+                            .build_int_compare(pred, lhs, rhs, "cmp")
+                            .unwrap();
+                        self.builder
+                            .build_int_z_extend(cmp, self.i64_type, "cmp_i64")
+                            .unwrap()
+                            .into()
+                    };
+                    let alloca = self
+                        .builder
+                        .build_alloca(self.i64_type, &format!("dest_{dest}"))
+                        .unwrap();
+                    self.builder.build_store(alloca, val).unwrap();
+                    self.locals.insert(*dest, alloca);
+                    return;
+                }
+
+                let callee = self.get_callee(func, args.len());
                 let arg_vals: Vec<BasicMetadataValueEnum> = args
                     .iter()
                     .map(|&id| self.gen_expr(&exprs[&id], exprs).into())
@@ -87,7 +133,7 @@ impl<'ctx> LLVMCodegen<'ctx> {
                 }
             }
             MirStmt::VoidCall { func, args } => {
-                let callee = self.get_callee(func);
+                let callee = self.get_callee(func, args.len());
                 let arg_vals: Vec<BasicMetadataValueEnum> = args
                     .iter()
                     .map(|&id| self.gen_expr(&exprs[&id], exprs).into())
@@ -133,7 +179,7 @@ impl<'ctx> LLVMCodegen<'ctx> {
                 let expr_val = self.gen_expr(&exprs[expr_id], exprs);
                 let is_ok = self
                     .builder
-                    .build_call(self.get_callee("result_is_ok"), &[expr_val.into()], "is_ok")
+                    .build_call(self.get_callee("result_is_ok", 1), &[expr_val.into()], "is_ok")
                     .unwrap();
                 let is_ok_val = Self::call_site_to_basic_value(is_ok)
                     .unwrap()
@@ -154,7 +200,7 @@ impl<'ctx> LLVMCodegen<'ctx> {
                 let data = self
                     .builder
                     .build_call(
-                        self.get_callee("result_get_data"),
+                        self.get_callee("result_get_data", 1),
                         &[expr_val.into()],
                         "get_data",
                     )
@@ -180,7 +226,7 @@ impl<'ctx> LLVMCodegen<'ctx> {
             MirStmt::MapNew { dest } => {
                 let call = self
                     .builder
-                    .build_call(self.get_callee("map_new"), &[], "map_new")
+                    .build_call(self.get_callee("map_new", 0), &[], "map_new")
                     .unwrap();
                 let ptr = Self::call_site_to_basic_value(call).unwrap();
                 let ptr_i64 = self
@@ -207,7 +253,7 @@ impl<'ctx> LLVMCodegen<'ctx> {
                 let key_val = self.gen_expr(&exprs[key_id], exprs);
                 let val_val = self.gen_expr(&exprs[val_id], exprs);
                 let _ = self.builder.build_call(
-                    self.get_callee("map_insert"),
+                    self.get_callee("map_insert", 3),
                     &[map_ptr.into(), key_val.into(), val_val.into()],
                     "dict_insert",
                 );
@@ -226,7 +272,7 @@ impl<'ctx> LLVMCodegen<'ctx> {
                 let call = self
                     .builder
                     .build_call(
-                        self.get_callee("map_get"),
+                        self.get_callee("map_get", 2),
                         &[map_ptr.into(), key_val.into()],
                         "dict_get",
                     )
@@ -241,6 +287,15 @@ impl<'ctx> LLVMCodegen<'ctx> {
             }
             MirStmt::If { cond, then, else_ } => {
                 let cond_val = self.gen_expr(&exprs[cond], exprs).into_int_value();
+                let cond_bool = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        cond_val,
+                        self.i64_type.const_zero(),
+                        "if_cond",
+                    )
+                    .unwrap();
                 let parent_fn = self
                     .builder
                     .get_insert_block()
@@ -251,18 +306,34 @@ impl<'ctx> LLVMCodegen<'ctx> {
                 let else_bb = self.context.append_basic_block(parent_fn, "else");
                 let merge_bb = self.context.append_basic_block(parent_fn, "merge");
                 self.builder
-                    .build_conditional_branch(cond_val, then_bb, else_bb)
+                    .build_conditional_branch(cond_bool, then_bb, else_bb)
                     .unwrap();
                 self.builder.position_at_end(then_bb);
                 for s in then {
                     self.gen_stmt(s, exprs);
                 }
-                self.builder.build_unconditional_branch(merge_bb).unwrap();
+                if self
+                    .builder
+                    .get_insert_block()
+                    .unwrap()
+                    .get_terminator()
+                    .is_none()
+                {
+                    self.builder.build_unconditional_branch(merge_bb).unwrap();
+                }
                 self.builder.position_at_end(else_bb);
                 for s in else_ {
                     self.gen_stmt(s, exprs);
                 }
-                self.builder.build_unconditional_branch(merge_bb).unwrap();
+                if self
+                    .builder
+                    .get_insert_block()
+                    .unwrap()
+                    .get_terminator()
+                    .is_none()
+                {
+                    self.builder.build_unconditional_branch(merge_bb).unwrap();
+                }
                 self.builder.position_at_end(merge_bb);
             }
             _ => {}
@@ -337,9 +408,10 @@ impl<'ctx> LLVMCodegen<'ctx> {
         }
     }
 
-    fn get_callee(&self, name: &str) -> FunctionValue<'ctx> {
+    fn get_callee(&self, name: &str, arg_count: usize) -> FunctionValue<'ctx> {
         self.module.get_function(name).unwrap_or_else(|| {
-            let fn_type = self.i64_type.fn_type(&[self.i64_type.into(); 2], false);
+            let args: Vec<_> = (0..arg_count).map(|_| self.i64_type.into()).collect();
+            let fn_type = self.i64_type.fn_type(&args, false);
             self.module.add_function(name, fn_type, None)
         })
     }
